@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from sklearn.metrics import f1_score, accuracy_score, classification_report
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.neighbors import NearestNeighbors
 from importantonlymit import ECGDataset, load_real_mitbih_dataset
 from ca_ssan_model import CASSAN
 
@@ -25,6 +26,28 @@ def contrast(h,y):
     valid=pos.any(1)
     return -(logp*pos).sum(1)[valid].div(pos.sum(1)[valid]).mean() if valid.any() else h.sum()*0
 
+def controlled_smote(w,r,y,ratios,rng):
+    x=np.concatenate([w,r],axis=1).astype(np.float32)
+    scale=np.maximum(x.std(axis=0),1e-6)
+    counts=np.bincount(y,minlength=4)
+    chunks=[x]; labels=[y]
+    for c,ratio in enumerate(ratios,1):
+        z=x[y==c]; n=max(0,int(np.ceil(counts[0]*ratio))-len(z))
+        if not n: continue
+        if len(z)<2: raise ValueError(f'SMOTE needs two real samples for class {c}')
+        k=min(5,len(z)-1)
+        nn=NearestNeighbors(n_neighbors=k+1).fit(z/scale)
+        neighbors=nn.kneighbors(z/scale,return_distance=False)
+        neighbors=np.stack([row[row!=i][:k] for i,row in enumerate(neighbors)])
+        i=rng.integers(len(z),size=n)
+        j=neighbors[i,rng.integers(k,size=n)]
+        lam=rng.random((n,1)).astype(np.float32)
+        chunks.append(z[i]+lam*(z[j]-z[i]))
+        labels.append(np.full(n,c,dtype=y.dtype))
+    x=np.concatenate(chunks); y=np.concatenate(labels)
+    if not np.isfinite(x).all(): raise ValueError('Nonfinite synthetic features')
+    return x[:,:w.shape[1]],x[:,w.shape[1]:],y
+
 def main():
     p=argparse.ArgumentParser()
     p.add_argument('--data',required=True)
@@ -35,7 +58,13 @@ def main():
     p.add_argument('--variant',choices=['reference','balanced','compact','qat','full'],default='full')
     p.add_argument('--out',required=True)
     p.add_argument('--test',action='store_true',help='Evaluate held-out test after configuration is frozen')
+    p.add_argument('--smote',action='store_true')
+    p.add_argument('--ratios',type=float,nargs=3,default=[.25,.35,.15],metavar=('S','V','F'))
+    p.add_argument('--patience',type=int,default=0)
+    p.add_argument('--schedule',action='store_true')
     a=p.parse_args()
+    if a.patience<0 or not all(0<=v<=1 for v in a.ratios): p.error('Invalid patience or ratios')
+    if a.smote and (a.variant=='reference' or a.limit): p.error('SMOTE requires full development data and balanced variant')
     if a.limit and a.test: p.error('Smoke runs cannot evaluate test')
     if a.epochs<1 or a.batch<2: p.error('Invalid epochs or batch')
     random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed)
@@ -50,15 +79,18 @@ def main():
     sets=[set(map(patient,r)) for r in records]
     assert not any(sets[i]&sets[j] for i in range(3) for j in range(i+1,3))
     print('Record splits:',records,flush=True)
-    def load(recs):
+    def load(recs,augment=False):
         w,r,y,ids=load_real_mitbih_dataset(recs,db_dir=a.data)
         if set(map(int,np.unique(ids)))!=set(recs): raise ValueError('Missing records')
         if not np.isfinite(w).all() or not np.isfinite(r).all(): raise ValueError('Nonfinite inputs')
         if a.limit and len(y)>a.limit:
             ix=rng.choice(len(y),a.limit,replace=False); w,r,y=w[ix],r[ix],y[ix]
         print('Class counts:',np.bincount(y,minlength=4),flush=True)
+        if augment:
+            w,r,y=controlled_smote(w,r,y,a.ratios,rng)
+            print('After training-only SMOTE:',np.bincount(y,minlength=4),flush=True)
         return ECGDataset(w,r,y),y
-    train,y=load(records[0]); val,vy=load(records[1])
+    train,y=load(records[0],augment=a.smote); val,vy=load(records[1])
     counts=np.bincount(y,minlength=4)
     if not a.limit and (min(counts)==0 or min(np.bincount(vy,minlength=4))==0):
         raise ValueError('Missing class in development split; predefine a suitable grouped split')
@@ -66,11 +98,13 @@ def main():
     weights=(1-.9999)/(1-np.power(.9999,np.maximum(counts,1)))
     weights=np.sqrt(weights); weights=weights/weights.mean()
     weights=torch.tensor(weights,dtype=torch.float32,device=dev)
-    sampler=WeightedRandomSampler(torch.tensor(np.power(np.maximum(counts,1),-.25)[y],dtype=torch.double),len(y),replacement=True) if balanced else None
+    sampler=WeightedRandomSampler(torch.tensor(np.power(np.maximum(counts,1),-.25)[y],dtype=torch.double),len(y),replacement=True) if balanced and not a.smote else None
     tl=DataLoader(train,batch_size=a.batch,sampler=sampler,shuffle=sampler is None)
     vl=DataLoader(val,batch_size=a.batch)
     m=CASSAN(compact=a.variant in ('compact','qat','full'),quant=a.variant in ('qat','full'),shift=a.variant in ('qat','full')).to(dev)
     opt=torch.optim.AdamW(m.parameters(),lr=.001)
+    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(opt,mode='max',factor=.5,patience=3,min_lr=1e-5) if a.schedule else None
+    history=[]; stale=0; best_epoch=0
     def collect(loader,threshold=None):
         m.eval(); ys=[]; ps=[]; ts=[]
         with torch.no_grad():
@@ -99,7 +133,14 @@ def main():
             loss_sum+=loss.item()
         yy,pp,_=collect(vl); f=score(yy,pp)
         print(f'Epoch {epoch+1}: loss={loss_sum/len(tl):.4f} val macro F1={f:.4f}',flush=True)
-        if f>best: best=f; state={k:v.detach().cpu().clone() for k,v in m.state_dict().items()}
+        history.append(dict(epoch=epoch+1,loss=loss_sum/len(tl),macro_f1=float(f),lr=opt.param_groups[0]['lr']))
+        if f>best:
+            best=f; best_epoch=epoch+1; stale=0
+            state={k:v.detach().cpu().clone() for k,v in m.state_dict().items()}
+        else: stale+=1
+        if scheduler is not None: scheduler.step(f)
+        if a.patience and stale>=a.patience:
+            print('Early stopping at epoch',epoch+1,flush=True); break
     m.load_state_dict(state)
     yy,pp,_=collect(vl)
     base=f1_score(yy,pp,labels=[0,1,2,3],average=None,zero_division=0)
@@ -117,7 +158,7 @@ def main():
         yy,pp,t=collect(loader,thresholds)
         return dict(accuracy=float(accuracy_score(yy,pp)),macro_f1=float(score(yy,pp)),avg_steps=t,
                     report=classification_report(yy,pp,labels=[0,1,2,3],target_names=['N','S','V','F'],zero_division=0,output_dict=True))
-    result=dict(config=vars(a),records=records,thresholds=thresholds.cpu().tolist(),parameters=sum(p.numel() for p in m.parameters()),validation=report(vl))
+    result=dict(history=history,best_epoch=best_epoch,training_counts=counts.tolist(),config=vars(a),records=records,thresholds=thresholds.cpu().tolist(),parameters=sum(p.numel() for p in m.parameters()),validation=report(vl))
     if a.test:
         ds,_=load(records[2]); result['test']=report(DataLoader(ds,batch_size=a.batch))
     out=Path(a.out); out.mkdir(parents=True,exist_ok=False)
