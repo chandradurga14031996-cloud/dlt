@@ -1,3 +1,66 @@
+# SSAN / proposed CA-SSAN — Windows PC and PYNQ-Z2 testing
+
+**Research development branch, not a validated clinical or FPGA neural accelerator.** The Python SSAN has been corrected; the current RTL is only an RR-threshold diagnostic. The proposed CA-SSAN focal loss, compression, distillation and three-stage controller are not yet implemented. Do not use historical accuracy, energy or power claims as new results.
+
+## 1. Download the correct branch
+
+Open PowerShell:
+```powershell
+git clone -b ca-ssan-improved https://github.com/chandradurga14031996-cloud/dlt.git
+cd dlt
+```
+Alternatively download the branch ZIP from GitHub (Code > Download ZIP), extract and open PowerShell in the extracted folder.
+
+## 2. Test Python on Windows (no FPGA required)
+
+Install Python 3.11 (64-bit) and Git. From the repository root:
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install torch numpy scipy scikit-learn wfdb matplotlib seaborn
+.\.venv\Scripts\python.exe -m py_compile SSANproject\Modeltrain\importantonlymit.py
+```
+Download MIT-BIH from https://physionet.org/content/mitdb/1.0.0/ . Extract the .hea, .dat and .atr files directly into SSANproject/Modeltrain/mitdb. Verify 100.hea, 100.dat and 100.atr are present.
+```powershell
+cd SSANproject\Modeltrain
+..\..\.venv\Scripts\python.exe -c "import torch; from importantonlymit import Proposed_SSAN_Model; m=Proposed_SSAN_Model().eval(); print(m(torch.randn(2,1,180),torch.ones(2,6)))"
+..\..\.venv\Scripts\python.exe -c "from importantonlymit import run_real_mitbih_proposed_benchmark; run_real_mitbih_proposed_benchmark('mitdb')"
+```
+The first command is a random-input smoke test, not an accuracy test. The second runs both 80-epoch protocols and may take hours on CPU. Check printed cohort counts and validation/test separation; results include accuracy, macro F1, per-class metrics and PNG figures. Retrain from scratch. The centered beat window requires 90 post-peak samples. DS2 was previously inspected; independent external evaluation is still needed. Timestep reduction is logical, not measured energy. AUC scores for early exits use constructed logits and are not calibrated.
+
+## 3. Vivado 2018.2 — build the legacy diagnostic only
+
+Install Vivado 2018.2 with Zynq-7000 device support and the PYNQ-Z2 board files from https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html . Follow the board vendor installation instructions and restart Vivado. Open Vivado with no project open. In the Tcl Console:
+```tcl
+source {C:/path/to/dlt/SSANproject/vivadofile/create_ssan_block_design.tcl}
+```
+Replace the path with your actual extracted folder. The script creates a new build_legacy_diagnostic project beside itself, applies the board preset, connects PS/DMA/reset/RTL, validates the block design and creates a wrapper. It refuses to overwrite an existing build directory. Rename old build directories after backing them up.
+
+If the script fails, copy the first ERROR line; do not proceed with an invalid design. IP configuration and board automation have not been verified in Vivado 2018.2.
+
+In Flow Navigator run Synthesis, then Implementation. Review utilization, timing and DRC; only generate a bitstream if the design passes. From the Tcl Console after implementation:
+```tcl
+open_run impl_1
+report_utilization
+report_timing_summary
+report_power
+```
+Vivado report_power is an estimate, not measured board power. Use activity-based estimation and external measurement for research. Zero DSP for this heuristic does not prove Zero DSP for trained SSAN.
+
+## 4. PYNQ-Z2 diagnostic
+
+The existing bit/hwh are old and unchanged. Do not pair unrelated metadata. After a successful rebuild, obtain the matching generated wrapper .bit and block-design .hwh, copy them together with identical base names to a new folder on the board. The legacy input is 186 32-bit words, each carrying one signed Q4.4 value in the low byte; output is one 32-bit word. The existing tester may use synthetic data or CPU fallback: neither establishes clinical accuracy. Inspect its reported execution mode. Do not deploy this as trained neural inference.
+
+## 5. Next work
+
+See [SSAN_IMPROVEMENTS_STATUS.md](SSAN_IMPROVEMENTS_STATUS.md). Full neural RTL, trained weight export, bit-accurate comparison, new CA-SSAN training experiments and measured energy remain outstanding. No full training, Vivado build or board test has been performed on this branch.
+
+## Historical README
+
+The previous README is retained below for provenance only. Its historical claims are not verified results for this branch.
+
+<details><summary>Original project README</summary>
+
 # Neuromorphic SSAN Accelerator for Real-Time Cardiac Arrhythmia Classification
 
 An end-to-end deep learning and FPGA hardware acceleration pipeline for automated, energy-efficient cardiac arrhythmia heartbeat classification based on the **MIT-BIH Arrhythmia Database**. This project integrates model training with PyTorch, Verilog-based hardware accelerator design for AMD-Xilinx Zynq-7000 SoC, PYNQ-Z2 board deployment via AXI DMA, and an interactive Hardware Diagnostic Studio UI.
@@ -155,3 +218,6 @@ To regenerate the block design in Vivado:
 * **S. Chandradurga**
 * Department of Electronics and Communication Engineering / Computer Science
 * Email: [chandradurga.kts@gmail.com](mailto:chandradurga.kts@gmail.com)
+
+
+</details>
