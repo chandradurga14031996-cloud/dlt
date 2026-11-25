@@ -64,16 +64,44 @@ def get_valid_dataset_dir(user_path=None):
     return None
 
 def fast_baseline_filter(signal, lowcut=0.5, fs=360):
-    """Fast cumsum-based moving average filter to remove ECG baseline wander."""
-    w_high = int(fs / lowcut)
-    if len(signal) > w_high:
-        cs = np.cumsum(np.insert(signal, 0, 0))
-        baseline = (cs[w_high:] - cs[:-w_high]) / float(w_high)
-        pad_left = w_high // 2
-        pad_right = len(signal) - len(baseline) - pad_left
-        baseline = np.pad(baseline, (pad_left, pad_right), mode='edge')
-        return signal - baseline
-    return signal
+    """Causal moving-average subtraction; not an ideal 0.5 Hz high-pass filter."""
+    signal = np.asarray(signal, dtype=np.float64)
+    if not signal.size:
+        return signal
+    window = max(1, int(fs / lowcut))
+    cs = np.concatenate(([0.0], np.cumsum(signal)))
+    ends = np.arange(1, signal.size + 1)
+    starts = np.maximum(0, ends - window)
+    baseline = (cs[ends] - cs[starts]) / (ends - starts)
+    return signal - baseline
+
+
+def causal_rolling_zscore(signal, fs=360, history_seconds=10):
+    """Normalize using present/past ECG only; retrain after preprocessing changes."""
+    signal = np.asarray(signal, dtype=np.float64)
+    if not signal.size:
+        return signal.astype(np.float32)
+    window = max(2, int(fs * history_seconds))
+    cs = np.concatenate(([0.0], np.cumsum(signal)))
+    cs2 = np.concatenate(([0.0], np.cumsum(signal * signal)))
+    ends = np.arange(1, signal.size + 1)
+    starts = np.maximum(0, ends - window)
+    n = ends - starts
+    mean = (cs[ends] - cs[starts]) / n
+    variance = (cs2[ends] - cs2[starts]) / n - mean * mean
+    return ((signal - mean) / np.maximum(np.sqrt(np.maximum(variance, 0.0)), 1e-3)).astype(np.float32)
+
+
+def causal_rr_features(rr_raw, peak_index, history_length=20):
+    """At beat i, only intervals rr_raw[:i] have completed."""
+    hist = np.asarray(rr_raw[max(0, peak_index-history_length):peak_index], dtype=np.float64)
+    if hist.size < 2:
+        raise ValueError("Need at least two completed RR intervals")
+    median = np.median(hist) + 1e-6
+    cur, prev = hist[-1]/median, hist[-2]/median
+    avg = np.mean(hist)/median
+    return np.asarray([cur, prev, cur/(prev+1e-6), cur-prev,
+                       avg, cur/(avg+1e-6)], dtype=np.float32)
 
 # ------------------------------------------------------------------------------
 # 2. REAL MIT-BIH DATASET LOADER WITH PATIENT-RELATIVE RR NORMALIZATION
@@ -109,13 +137,13 @@ def load_real_mitbih_dataset(records, db_dir=None, window_size=180):
 
         raw_signal = record.p_signal.flatten()
         signal = fast_baseline_filter(raw_signal, fs=record.fs)
-        signal = (signal - np.mean(signal)) / (np.std(signal) + 1e-6)  # Z-score normalization
+        signal = causal_rolling_zscore(signal, fs=record.fs)
 
         peaks = annotation.sample
         symbols = annotation.symbol
         fs = record.fs
         rr_raw = np.diff(peaks) / fs  # RR in seconds
-        rec_median_rr = np.median(rr_raw) + 1e-6  # Patient baseline median RR
+        # RR features are normalized using completed intervals only.
 
         for i in range(2, len(peaks) - 2):
             sym = symbols[i]
@@ -130,18 +158,7 @@ def load_real_mitbih_dataset(records, db_dir=None, window_size=180):
 
             beat_wf = signal[peak_idx - half_w : peak_idx + half_w]
 
-            # Patient-relative RR features
-            rr_prev = rr_raw[i - 1] / rec_median_rr
-            rr_next = rr_raw[i] / rec_median_rr
-            rr_ratio = rr_prev / (rr_next + 1e-6)
-            rr_diff = rr_prev - rr_next
-            
-            local_start = max(0, i - 5)
-            local_end = min(len(rr_raw), i + 5)
-            rr_local_avg = np.mean(rr_raw[local_start:local_end]) / rec_median_rr
-            rr_pre_ratio = rr_prev / (rr_local_avg + 1e-6)
-
-            rr_feat = np.array([rr_prev, rr_next, rr_ratio, rr_diff, rr_local_avg, rr_pre_ratio], dtype=np.float32)
+            rr_feat = causal_rr_features(rr_raw, i)
 
             all_waveforms.append(beat_wf)
             all_rr.append(rr_feat)
@@ -220,16 +237,21 @@ class LIFNeuron(nn.Module):
         return spk, mem
 
 class PowerOfTwoQuantizer(nn.Module):
-    def __init__(self, num_bits=8):
-        super(PowerOfTwoQuantizer, self).__init__()
+    """STE, preserving zero and signed exponents (future RTL must handle right shifts)."""
+    def __init__(self, num_bits=8, min_exponent=-7, max_exponent=7):
+        super().__init__()
         self.num_bits = num_bits
+        self.min_exponent = min_exponent
+        self.max_exponent = max_exponent
 
     def forward(self, weight):
-        sign = torch.sign(weight)
-        abs_w = torch.clamp(torch.abs(weight), min=1e-4, max=16.0)
-        exponent = torch.clamp(torch.round(torch.log2(abs_w)), min=-(2**(self.num_bits-1)-1), max=2**(self.num_bits-1)-1)
-        po2_weight = sign * (2.0 ** exponent)
-        return weight + (po2_weight - weight).detach()
+        mag = weight.abs()
+        is_zero = mag < (2.0 ** self.min_exponent) / 2.0
+        exponent = torch.round(torch.log2(mag.clamp(min=1e-12)))
+        exponent = exponent.clamp(self.min_exponent, self.max_exponent)
+        quantized = torch.where(is_zero, torch.zeros_like(weight),
+                                torch.sign(weight) * torch.pow(2.0, exponent))
+        return weight + (quantized - weight).detach()
 
 # ------------------------------------------------------------------------------
 # 4. SOFTMAX-FREE SPIKING SELF-ATTENTION (SSA) LAYER
@@ -271,8 +293,9 @@ class SpikingSelfAttention(nn.Module):
 
         q_t = sq.transpose(1, 2)
         v_t = sv.transpose(1, 2)
-        attn = torch.bmm(q_t, sk) * self.scale
-        out = torch.bmm(attn, v_t).transpose(1, 2).contiguous()
+        # Associative linear attention: Q(K^T V), no quadratic sequence matrix.
+        kv = torch.bmm(sk, v_t)
+        out = (torch.bmm(q_t, kv) * self.scale).transpose(1, 2).contiguous()
         
         out = self.bn_attn(out + x)
         return out, mq, mk, mv
@@ -346,7 +369,7 @@ class Proposed_SSAN_Model(nn.Module):
             s1_spk_accum += spk_s1
 
             # Dynamic Timestep Controller (DTC) Early Exit at t=3
-            if t == self.early_exit_t:
+            if t + 1 == self.early_exit_t:
                 rr_ratio = rr[:, 2]     # Patient-relative RR_ratio
                 rr_pre = rr[:, 5]       # Patient-relative RR_pre_ratio
                 
@@ -403,7 +426,7 @@ class Proposed_SSAN_Model(nn.Module):
             spk_s1, ms1 = self.s1_lif(self.s1_head(fused), ms1)
             s1_spk_accum += spk_s1
 
-            if t == self.early_exit_t:
+            if t + 1 == self.early_exit_t:
                 rr_ratio = rr[:, 2]
                 rr_pre = rr[:, 5]
                 regular_rhythm = (rr_ratio >= 0.85) & (rr_ratio <= 1.15) & (rr_pre >= 0.85) & (rr_pre <= 1.15)
@@ -441,7 +464,7 @@ def train_proposed_ssan(model, train_loader, val_loader=None, epochs=80, lr=1e-3
     print(f"\n[*] Starting Training: {protocol_name} ({epochs} Full Epochs)...", flush=True)
 
     train_losses, train_accs, val_accs, val_f1s = [], [], [], []
-    best_f1 = 0.0
+    best_f1 = float("-inf")
     best_weights = None
 
     t0 = time.time()
@@ -537,7 +560,7 @@ def evaluate_proposed_ssan(model, test_loader):
             y_true.extend(y.cpu().numpy())
             y_pred.extend(pred.cpu().numpy())
             y_proba.extend(proba.cpu().numpy())
-            t_used.append(avg_t)
+            t_used.extend([avg_t] * len(y))
 
     y_true  = np.array(y_true)
     y_pred  = np.array(y_pred)
@@ -696,9 +719,9 @@ def generate_publication_plots(train_losses_a, train_accs_a, val_accs_a, dict_a,
     ax1.set_ylim(0, 10)
     ax2 = ax1.twinx()
     ax2.bar(x + width/2, energy_savings, width, label='Energy Savings (%)', color='#2ecc71')
-    ax2.set_ylabel('Energy Savings % (Higher = Better)', color='#2ecc71', fontweight='bold')
+    ax2.set_ylabel('Theoretical Timestep Reduction %', color='#2ecc71', fontweight='bold')
     ax2.set_ylim(0, 100)
-    plt.title('Dynamic Timestep Controller (DTC) Low-Power Hardware Savings', fontsize=12, fontweight='bold')
+    plt.title('Dynamic Timestep Controller (DTC) Logical Timestep Reduction (Not Power Measurement)', fontsize=12, fontweight='bold')
     ax1.set_xticks(x); ax1.set_xticklabels(protocols, fontweight='bold')
     fig.tight_layout()
     plt.savefig('dtc_energy_timesteps_chart.png', dpi=300); plt.close()
@@ -770,36 +793,48 @@ def run_real_mitbih_proposed_benchmark(custom_path=None):
     lbl_all = np.concatenate([lbl_ds1, lbl_ds2], axis=0)
     rec_all = np.concatenate([rec_ds1, rec_ds2], axis=0)
 
-    train_idx, test_idx = patient_specific_split(wf_all, rr_all, lbl_all, rec_all, test_ratio=0.2)
+    train_val_idx, test_idx = patient_specific_split(wf_all, rr_all, lbl_all, rec_all, test_ratio=0.2)
+    train_sub, val_sub = patient_specific_split(wf_all[train_val_idx], rr_all[train_val_idx], lbl_all[train_val_idx], rec_all[train_val_idx], test_ratio=0.2, seed=43)
+    train_idx, val_idx = train_val_idx[train_sub], train_val_idx[val_sub]
+    assert not(set(train_idx) & set(val_idx) or set(train_idx) & set(test_idx) or set(val_idx) & set(test_idx))
 
     train_intra = ECGDataset(wf_all[train_idx], rr_all[train_idx], lbl_all[train_idx])
-    test_intra  = ECGDataset(wf_all[test_idx], rr_all[test_idx], lbl_all[test_idx])
+    val_intra = ECGDataset(wf_all[val_idx], rr_all[val_idx], lbl_all[val_idx])
+    test_intra = ECGDataset(wf_all[test_idx], rr_all[test_idx], lbl_all[test_idx])
 
     loader_train_intra = DataLoader(train_intra, batch_size=256, shuffle=True)
-    loader_test_intra  = DataLoader(test_intra, batch_size=256, shuffle=False)
+    loader_val_intra = DataLoader(val_intra, batch_size=256, shuffle=False)
+    loader_test_intra = DataLoader(test_intra, batch_size=256, shuffle=False)
 
     print("\n" + "-"*80, flush=True)
     print(" [Protocol A] Patient-Specific Stratified Split (80% Train / 20% Test)", flush=True)
     print("-"*80, flush=True)
     m_intra = Proposed_SSAN_Model().to(device)
     train_losses_a, train_accs_a, val_accs_a, val_f1s_a = train_proposed_ssan(
-        m_intra, loader_train_intra, val_loader=loader_test_intra, epochs=80, protocol_name="Protocol A (Intra-Patient)"
+        m_intra, loader_train_intra, val_loader=loader_val_intra, epochs=80, protocol_name="Protocol A (Intra-Patient)"
     )
     acc_intra, f1_intra, t_intra, report_intra, dict_intra = evaluate_proposed_ssan(m_intra, loader_test_intra)
 
     # Protocol B: Inter-Patient Split (DS1 -> DS2)
-    train_inter = ECGDataset(wf_ds1, rr_ds1, lbl_ds1)
-    test_inter  = ECGDataset(wf_ds2, rr_ds2, lbl_ds2)
+    from sklearn.model_selection import GroupShuffleSplit
+    split = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    i_train, i_val = next(split.split(wf_ds1, lbl_ds1, groups=rec_ds1))
+    assert set(rec_ds1[i_train]).isdisjoint(set(rec_ds1[i_val]))
+    assert set(rec_ds1).isdisjoint(set(rec_ds2))
+    train_inter = ECGDataset(wf_ds1[i_train], rr_ds1[i_train], lbl_ds1[i_train])
+    val_inter = ECGDataset(wf_ds1[i_val], rr_ds1[i_val], lbl_ds1[i_val])
+    test_inter = ECGDataset(wf_ds2, rr_ds2, lbl_ds2)
 
     loader_train_inter = DataLoader(train_inter, batch_size=256, shuffle=True)
-    loader_test_inter  = DataLoader(test_inter, batch_size=256, shuffle=False)
+    loader_val_inter = DataLoader(val_inter, batch_size=256, shuffle=False)
+    loader_test_inter = DataLoader(test_inter, batch_size=256, shuffle=False)
 
     print("\n" + "-"*80, flush=True)
     print(" [Protocol B] Inter-Patient Evaluation Split (AAMI DS1 -> DS2)", flush=True)
     print("-"*80, flush=True)
     m_inter = Proposed_SSAN_Model().to(device)
     train_losses_b, train_accs_b, val_accs_b, val_f1s_b = train_proposed_ssan(
-        m_inter, loader_train_inter, val_loader=loader_test_inter, epochs=80, protocol_name="Protocol B (Inter-Patient)"
+        m_inter, loader_train_inter, val_loader=loader_val_inter, epochs=80, protocol_name="Protocol B (Inter-Patient)"
     )
     acc_inter, f1_inter, t_inter, report_inter, dict_inter = evaluate_proposed_ssan(m_inter, loader_test_inter)
 
@@ -825,7 +860,7 @@ def run_real_mitbih_proposed_benchmark(custom_path=None):
         print(f"  Cohen's Kappa   : {d['kappa']:.4f}%", flush=True)
         print(f"  MCC             : {d['mcc']:.4f}%", flush=True)
         print(f"  Macro AUC-ROC   : {d['auc_macro']:.4f}%", flush=True)
-        print(f"  Avg Timesteps   : {t_val:.4f}/10  →  DTC Energy Savings: {es:.2f}%", flush=True)
+        print(f"  Avg Timesteps   : {t_val:.4f}/10  →  Theoretical Timestep Reduction: {es:.2f}%", flush=True)
         print(f"\n  {'Class':<8} {'Se(%)':<9} {'Sp(%)':<9} {'+P(%)':<9} {'F1(%)':<9} "
               f"{'FPR(%)':<9} {'FNR(%)':<9} {'DER(%)':<9} {'AUC(%)':<9} "
               f"{'TP':<7} {'TN':<7} {'FP':<7} {'FN':<7}", flush=True)
