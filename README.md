@@ -1,3 +1,24 @@
+# Enhanced CA-SSAN experimental pipeline
+
+The original importantonlymit.py remains unchanged. New files are under SSANproject/Modeltrain.
+From the repository root in Windows PowerShell, using the existing Python 3.13 virtual environment:
+
+```powershell
+git switch ca-ssan-improved
+git pull origin ca-ssan-improved
+.\.venv\Scripts\python.exe -m py_compile SSANproject\Modeltrain\ca_ssan_model.py SSANproject\Modeltrain\train_ca_ssan.py
+.\.venv\Scripts\python.exe SSANproject\Modeltrain\train_ca_ssan.py --data SSANproject/Modeltrain/mitdb --epochs 2 --limit 512 --variant full --out runs/ca_smoke
+```
+
+Use a fresh output directory for each run. Metrics are fractions (0–1), not percentages.
+Smoke results are not publication results. For full development runs remove --limit, set --epochs 80, and use distinct --out directories. Variants: reference (new architecture control, not original SSAN), balanced (focal + sampler), compact (adds projection compression), qat (adds Po2 and shift-compatible decay), full (adds contrastive, activity loss and calibrated actual early exit). These are cumulative bundles, not isolated component ablations. Use identical seeds and splits. The original SSAN needs a matched-split comparison before claiming improvement.
+
+Record 202 is moved into development with 201, which is treated as the same patient. Validation is grouped within development; test is not loaded unless --test is explicitly requested after model selection. This is a modified DS1/DS2 protocol, not directly comparable with canonical splits. Prior test exposure cannot be undone. The inherited preprocessing uses annotated beat centers and a 250 ms post-peak window; it is not an end-to-end causal detector. Audit RR annotation handling and patient identities before publication.
+
+No knowledge distillation, fixed-point RTL, weight export or measured hardware energy is implemented in this revision. QAT is floating-point simulation; softmax is used for exit confidence only. Existing Tcl/RTL remain diagnostic. No runtime tests have been executed on the new code by the authoring environment.
+
+---
+
 # SSAN / proposed CA-SSAN — Windows PC and PYNQ-Z2 testing
 
 **Research development branch, not a validated clinical or FPGA neural accelerator.** The Python SSAN has been corrected; the current RTL is only an RR-threshold diagnostic. The proposed CA-SSAN focal loss, compression, distillation and three-stage controller are not yet implemented. Do not use historical accuracy, energy or power claims as new results.
