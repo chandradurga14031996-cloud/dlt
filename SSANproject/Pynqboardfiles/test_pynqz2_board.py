@@ -1,5 +1,5 @@
 # ==============================================================================
-# PYNQ-Z2 LIVE BOARD HARDWARE TESTER (GUARANTEED TO RUN)
+# PYNQ-Z2 LEGACY RR-HEURISTIC DIAGNOSTIC (NOT TRAINED SSAN)
 # Target Board: AMD-Xilinx PYNQ-Z2 (Zynq-7020 SoC)
 # 
 # Works directly in Jupyter Notebook (Untitled.ipynb) or Linux Terminal.
@@ -16,7 +16,7 @@ import numpy as np
 CLASS_NAMES = ["Normal (N)", "SVEB (S)", "VEB (V)", "Fusion (F)"]
 
 print("=" * 75)
-print("       PYNQ-Z2 FPGA HARDWARE ACCELERATOR LIVE CLASSIFIER")
+print("       PYNQ-Z2 LEGACY RR-HEURISTIC DIAGNOSTIC")
 print("=" * 75)
 
 # ------------------------------------------------------------------------------
@@ -70,6 +70,14 @@ else:
     test_labels = np.array(labels_list)[perm]
     print(f"[+] Created {len(test_labels)} balanced in-memory heartbeats.")
 
+# The current RTL takes exactly 186 32-bit input words, with int8 in low byte.
+# This benchmark is diagnostic, not an evaluation of a trained neural network.
+test_packets = np.asarray(test_packets)
+if test_packets.ndim != 2 or test_packets.shape[1] != 186:
+    raise ValueError("Legacy RTL expects 186 input words (180 ECG + six RR)")
+if np.max(np.abs(test_packets)) > 128:
+    test_packets = np.clip(test_packets.astype(np.int64) >> 8, -128, 127)
+test_packets = test_packets.astype(np.int32)
 num_beats = len(test_labels)
 counts = [int(np.sum(test_labels == i)) for i in range(4)]
 print(f"    Distribution: Normal={counts[0]} | SVEB={counts[1]} | VEB={counts[2]} | Fusion={counts[3]}\n")
@@ -194,7 +202,7 @@ else:
 
         if 0.85 <= rr_ratio <= 1.15:
             pred_class = 0  # Normal
-            exit_t = 4       # DTC Early Exit at t=3 (timesteps 4)
+            exit_t = 4       # Legacy bitstream exits after four iterations
         elif rr_ratio <= 0.55:
             pred_class = 1  # SVEB
             exit_t = 10
@@ -232,7 +240,7 @@ throughput = num_beats / total_sec
 avg_timesteps = float(np.mean(timesteps_used))
 energy_savings = (1.0 - (avg_timesteps / 10.0)) * 100.0
 
-mode_str = "FPGA HARDWARE (AXI DMA @ 100 MHz)" if (dma is not None) else "ARM CPU EMULATION"
+mode_str = "FPGA LEGACY HEURISTIC RTL (DMA + software timing)" if (dma is not None) else "CPU HEURISTIC EMULATION"
 
 print("\n" + "=" * 75)
 print(f"  CLASSIFICATION REPORT & HARDWARE METRICS ({mode_str})")
@@ -242,7 +250,7 @@ print(f"  - Overall Accuracy         : {accuracy:.2f}%")
 print(f"  - Measured Avg Latency     : {avg_lat:.3f} ms / beat")
 print(f"  - Measured Throughput      : {throughput:.1f} beats / second")
 print(f"  - Average Timesteps (DTC)  : {avg_timesteps:.2f} / 10")
-print(f"  - Hardware Energy Savings  : {energy_savings:.1f}%")
+print(f"  - Theoretical Timestep Reduction  : {energy_savings:.1f}%")
 print(f"  - Total Test Duration      : {total_sec:.3f} seconds")
 
 print("\nPer-Class Sensitivity & Specificity Breakdown:")
@@ -268,5 +276,6 @@ for r in range(4):
     vals_str = " ".join([f"{cm[r, c]:8d}" for c in range(4)])
     print(f"  {row_label:<9s} {vals_str}")
 print("=" * 75 + "\n")
-print("[+] Test completed successfully!")
+print("[!] Diagnostic only: not trained SSAN inference, clinical validation, or measured energy.")
+print("[+] Diagnostic test completed.")
 
