@@ -1,3 +1,15 @@
+# One-command Windows smoke test
+
+From your local repository in PowerShell:
+
+```powershell
+git switch ca-ssan-improved
+git pull --ff-only origin ca-ssan-improved
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_ca_ssan.ps1
+```
+
+Requires the existing .venv and MIT-BIH dataset. The script checks dependencies and syntax, trains for two epochs with at most 512 beats per development partition, exports HEX, verifies the integer reference and stops on any failed command. Timestamped output folders and transcript logs preserve previous runs. A float/integer prediction mismatch is a failure, not a reason to bypass verification. No test partition, Vivado or board is used. This script has not yet been executed on Windows by the authoring environment. Smoke success does not establish clinical accuracy or FPGA correctness.
+
 ## Hardware export (experimental)
 
 After a successful full or qat training run, export its checkpoint. Smoke weights are for interface testing only.
