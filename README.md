@@ -1,3 +1,16 @@
+## Hardware export (experimental)
+
+After a successful full or qat training run, export its checkpoint. Smoke weights are for interface testing only.
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile SSANproject\Modeltrain\export_weights.py SSANproject\Modeltrain\fixed_point_reference.py SSANproject\Modeltrain\verify_hex_weights.py
+.\.venv\Scripts\python.exe SSANproject\Modeltrain\export_weights.py --checkpoint runs/ca_smoke/model.pt --out runs/ca_hex_smoke --data SSANproject/Modeltrain/mitdb
+.\.venv\Scripts\python.exe SSANproject\Modeltrain\verify_hex_weights.py --checkpoint runs/ca_smoke/model.pt --dir runs/ca_hex_smoke
+```
+
+Use a new output directory on every export. All eight affine layers have 8-bit Po2 weights (80 zero, bit 6 sign, bits 5:0 signed exponent -7..7), 32-bit signed Q16.16 biases, C-order flattening, one word per line. Inputs are 180 ECG and 6 RR Q16.16 words; outputs are four signed Q16.16 logits. Integer reference uses 64-bit sums, arithmetic right shifts, floor division and signed 32-bit saturation. Thresholds are Q16.16 probability margins (2 disables early exit). Confidence still uses host floating softmax; a hardware confidence controller is not implemented. Manifest includes file hashes, shapes, scaling, expected class/timestep and float comparison. Synthetic and optional development-record vectors are not a clinical accuracy test. Integer replay is not independent RTL verification. Float mismatch is possible and must be investigated. No new bitstream or RTL integration is provided; do not use these files with the old diagnostic RTL. Export and verification have not yet been executed in the authoring environment.
+
+
 # Enhanced CA-SSAN experimental pipeline
 
 The original importantonlymit.py remains unchanged. New files are under SSANproject/Modeltrain.
