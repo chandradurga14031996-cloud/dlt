@@ -1,3 +1,13 @@
+# Controlled SMOTE comparison (Windows)
+
+After switching to ca-ssan-improved and pulling, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_ca_compare.ps1
+```
+
+Default: 10 epochs per model, baseline versus training-only SMOTE (S/V/F ratios .25/.35/.15). Both use seed 42, validation-driven LR scheduling and patience 15. Add -Sweep to compare three additional ratio settings; add -Epochs 80 for longer experiments. Outputs are timestamped under runs/ca_compare_* and logs/. comparison.csv contains validation accuracy, macro and class F1, recall and average timesteps. Highest validation macro F1 selects a candidate; baseline and candidate HEX are exported and checked. Test remains unused. Equal epoch budgets do not imply equal optimizer updates after oversampling. No hardware power measurement is performed. Synthetic morphology and Windows runtime remain to be validated.
+
 # One-command Windows smoke test
 
 From your local repository in PowerShell:
