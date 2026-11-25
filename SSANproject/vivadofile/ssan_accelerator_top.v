@@ -1,13 +1,13 @@
 // ==============================================================================
-// VERILOG HDL HARDWARE ACCELERATOR: NEUROMORPHIC LOW-POWER SSAN FOR PYNQ-Z2
+// LEGACY RR HEURISTIC RTL DIAGNOSTIC (NOT TRAINED SSAN INFERENCE)
 // Target FPGA: AMD-Xilinx Zynq-7020 (PYNQ-Z2 PL Fabric)
 // 
 // Key Architecture Features:
 // 1. 0% DSP Slice Saturation: Uses Pure LUT Power-of-Two (Po2) Bit-Shift Arithmetic
 // 2. Direct Hex Weight Loading: Reads 'model_classical_ssan_weights.hex' via $readmemh
 // 3. Event-Driven LIF Spiking Sparsity: Bypasses 0-spike computations in Conv2
-// 4. Dynamic Timestep Controller (DTC): Early Exit at t=3 for >68% Energy Savings
-// 5. Full RTL State Machine Pipeline: Real-time per-beat multi-class prediction
+// 4. RR-threshold early exit: NOT measured power reduction
+// 5. Diagnostic RR-threshold classification only
 // ==============================================================================
 
 `timescale 1ns / 1ps
@@ -190,7 +190,7 @@ module ssan_accelerator_top #(
                         end
 
                         // Dynamic Timestep Controller (DTC) Early Exit Evaluation at t = 3
-                        if (current_t == EARLY_EXIT_T) begin
+                        if ((current_t + 4'd1) == EARLY_EXIT_T) begin
                             if (rr_features[2] >= 8'sd14 && rr_features[2] <= 8'sd18) begin
                                 early_exit_triggered <= 1'b1;
                                 stage1_pred <= 2'd0; // Normal Exit
@@ -232,7 +232,7 @@ module ssan_accelerator_top #(
                     m_axis_tlast  <= 1'b1;
                     m_axis_tdata  <= {24'b0, current_t, stage1_pred, final_class_id};
 
-                    if (m_axis_tready) begin
+                    if (m_axis_tvalid && m_axis_tready) begin
                         state <= STATE_IDLE;
                     end
                 end
@@ -259,48 +259,16 @@ module ssan_accelerator_top #(
     // --------------------------------------------------------------------------
     // REAL-TIME HARDWARE POWER (mW) & ENERGY (pJ) EMULATION ENGINE
     // --------------------------------------------------------------------------
-    // Hardware Power Parameters (derived from Vivado Post-Route SAIF Report):
+    // Legacy arbitrary debug constants (not measurements):
     // - Idle Baseline       : 1 mW  (16'd1)
     // - AXI-Stream Read     : 12 mW (16'd12)
     // - Spiking Conv / SSA  : 36 mW (16'd36) (Paper Peak Model Power)
     // - DTC Early Exit Eval : 18 mW (16'd18)
     // - AXI-Stream Write    : 8 mW  (16'd8)
     // --------------------------------------------------------------------------
-    reg [15:0] power_mw_reg;
-    reg [31:0] energy_pj_reg;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            power_mw_reg  <= 16'd1;
-            energy_pj_reg <= 32'd0;
-        end else begin
-            case (state)
-                STATE_IDLE: begin
-                    power_mw_reg  <= 16'd1;
-                    energy_pj_reg <= energy_pj_reg + 32'd10; // 1 mW * 10 ns
-                end
-                STATE_READ_INPUT: begin
-                    power_mw_reg  <= 16'd12;
-                    energy_pj_reg <= energy_pj_reg + 32'd120; // 12 mW * 10 ns
-                end
-                STATE_PROCESS_T: begin
-                    power_mw_reg  <= 16'd36; // 36 mW peak active spiking processing
-                    energy_pj_reg <= energy_pj_reg + 32'd360;
-                end
-                STATE_EVALUATE: begin
-                    power_mw_reg  <= 16'd18;
-                    energy_pj_reg <= energy_pj_reg + 32'd180;
-                end
-                STATE_WRITE_OUT: begin
-                    power_mw_reg  <= 16'd8;
-                    energy_pj_reg <= energy_pj_reg + 32'd80;
-                end
-                default: begin
-                    power_mw_reg  <= 16'd1;
-                end
-            endcase
-        end
-    end
+    // ILA pin compatibility ONLY. These are NOT physical power measurements.
+    wire [15:0] power_mw_reg = 16'd0;
+    wire [31:0] energy_pj_reg = 32'd0;
 
     assign probe_power_mw  = power_mw_reg;
     assign probe_energy_pj = energy_pj_reg;
