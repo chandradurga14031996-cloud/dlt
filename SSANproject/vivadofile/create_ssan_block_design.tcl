@@ -1,5 +1,5 @@
 # ==============================================================================
-# VIVADO IP INTEGRATOR BLOCK DESIGN TCL SCRIPT (SUCCESSFUL BUILD)
+# VIVADO IP INTEGRATOR — LEGACY DIAGNOSTIC (UNVERIFIED BUILD)
 # Target Board : AMD-Xilinx PYNQ-Z2 (Zynq-7020 SoC / xc7z020clg400-1)
 # Design Name  : ssan_pynqz2_bd
 # ==============================================================================
@@ -7,34 +7,39 @@
 set design_name "ssan_pynqz2_bd"
 set target_part "xc7z020clg400-1"
 
-# 0. Check if a Vivado project is open; if not, create one automatically
-if {[catch {current_project}]} {
-    puts "[*] No open project detected. Creating project 'ssan_pynqz2_proj'..."
-    create_project ssan_pynqz2_proj ./ssan_pynqz2_proj -part $target_part -force
-    if {[file exists "./ssan_accelerator_top.v"]} {
-        add_files -norecurse ./ssan_accelerator_top.v
-    }
-    if {[file exists "./model_classical_ssan_weights.hex"]} {
-        add_files -norecurse ./model_classical_ssan_weights.hex
-    }
+# Resolve paths relative to this script, not the Tcl console working directory.
+set script_dir [file dirname [file normalize [info script]]]
+set project_dir [file join $script_dir build_legacy_diagnostic]
+if {[llength [get_projects -quiet]] != 0} {
+    error "Close the existing project before sourcing this script."
 }
-
-# If block design exists, close and remove old version before recreating
-if {[get_bd_designs $design_name] != ""} {
-    close_bd_design [get_bd_designs $design_name]
-    remove_files [get_files $design_name.bd]
+if {[file exists $project_dir]} {
+    error "Build directory already exists. Rename it or remove it after backing up."
 }
+set board_parts [get_board_parts -quiet *pynq-z2*]
+if {[llength $board_parts] == 0} {
+    error "Install PYNQ-Z2 board files for Vivado and restart Vivado."
+}
+create_project ssan_pynqz2_proj $project_dir -part $target_part
+set_property board_part [lindex $board_parts 0] [current_project]
+foreach name {ssan_accelerator_top.v model_classical_ssan_weights.hex} {
+    set src [file join $script_dir $name]
+    if {![file exists $src]} {error "Missing source: $src"}
+    add_files -norecurse $src
+}
+update_compile_order -fileset sources_1
 
 # Create Block Design in Vivado IP Integrator
-puts "[*] Creating Vivado IP Integrator Block Design '$design_name'..."
+puts "INFO: Creating Vivado IP Integrator Block Design '$design_name'..."
 create_bd_design $design_name
 
 # ------------------------------------------------------------------------------
 # 1. INSTANTIATE ZYNQ-7020 PROCESSING SYSTEM 7 (PS7)
 # ------------------------------------------------------------------------------
-puts "[*] Instantiating Zynq-7020 Processing System..."
+puts "INFO: Instantiating Zynq-7020 Processing System..."
 set processing_system7_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7:5.5 processing_system7_0]
 
+apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 -config {make_external "FIXED_IO, DDR" apply_board_preset "1" Master "Disable" Slave "Disable"} [get_bd_cells processing_system7_0]
 set_property -dict [list \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {100} \
     CONFIG.PCW_USE_M_AXI_GP0 {1} \
@@ -46,16 +51,20 @@ set_property -dict [list \
 # ------------------------------------------------------------------------------
 # 2. INSTANTIATE PROCESSOR SYSTEM RESET
 # ------------------------------------------------------------------------------
-puts "[*] Instantiating Processor System Reset Block..."
+puts "INFO: Instantiating Processor System Reset Block..."
 set rst_ps7_0_100M [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_100M]
 
+set_property CONFIG.C_EXT_RESET_HIGH {0} $rst_ps7_0_100M
+set reset_locked [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 reset_locked]
+set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}] $reset_locked
+connect_bd_net [get_bd_pins reset_locked/dout] [get_bd_pins rst_ps7_0_100M/dcm_locked]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins rst_ps7_0_100M/slowest_sync_clk]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_RESET0_N] [get_bd_pins rst_ps7_0_100M/ext_reset_in]
 
 # ------------------------------------------------------------------------------
 # 3. INSTANTIATE AXI DIRECT MEMORY ACCESS (DMA)
 # ------------------------------------------------------------------------------
-puts "[*] Instantiating AXI Direct Memory Access..."
+puts "INFO: Instantiating AXI Direct Memory Access..."
 set axi_dma_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0]
 
 set_property -dict [list \
@@ -70,7 +79,7 @@ set_property -dict [list \
 # ------------------------------------------------------------------------------
 # 4. CONNECT GP0 CONTROL INTERCONNECT (PS7 GP0 -> AXI DMA S_AXI_LITE)
 # ------------------------------------------------------------------------------
-puts "[*] Instantiating GP0 Control Interconnect..."
+puts "INFO: Instantiating GP0 Control Interconnect..."
 set ps7_0_axi_periph [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 ps7_0_axi_periph]
 set_property -dict [list CONFIG.NUM_MI {1}] $ps7_0_axi_periph
 
@@ -93,7 +102,7 @@ connect_bd_intf_net [get_bd_intf_pins ps7_0_axi_periph/M00_AXI] [get_bd_intf_pin
 # ------------------------------------------------------------------------------
 # 5. CONNECT SMARTCONNECT FOR HIGH-SPEED DMA (MM2S & S2MM -> PS7 S_AXI_HP0)
 # ------------------------------------------------------------------------------
-puts "[*] Instantiating SmartConnect for High-Performance DMA Data Transfers..."
+puts "INFO: Instantiating SmartConnect for High-Performance DMA Data Transfers..."
 set axi_smc [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 axi_smc]
 set_property -dict [list CONFIG.NUM_SI {2}] $axi_smc
 
@@ -112,7 +121,7 @@ connect_bd_intf_net [get_bd_intf_pins axi_smc/M00_AXI] [get_bd_intf_pins process
 # ------------------------------------------------------------------------------
 # 6. ADD SSAN VERILOG ACCELERATOR MODULE & AXI-STREAM DATA CHANNELS
 # ------------------------------------------------------------------------------
-puts "[*] Adding SSAN Neuromorphic Accelerator Verilog Module..."
+puts "INFO: Adding SSAN Neuromorphic Accelerator Verilog Module..."
 set ssan_accelerator_top_0 [create_bd_cell -type module -reference ssan_accelerator_top ssan_accelerator_top_0]
 
 # DMA MM2S Master -> SSAN Slave (Input ECG Features Stream)
@@ -128,11 +137,19 @@ connect_bd_net [get_bd_pins rst_ps7_0_100M/peripheral_aresetn] [get_bd_pins ssan
 # ------------------------------------------------------------------------------
 # 7. ASSIGN ADDRESS SPACE & VALIDATE BLOCK DESIGN
 # ------------------------------------------------------------------------------
-puts "[*] Assigning Memory Address Spaces & Validating Block Design..."
+puts "INFO: Assigning Memory Address Spaces & Validating Block Design..."
 assign_bd_address
 
 regenerate_bd_layout
 validate_bd_design
 save_bd_design
 
-puts "SUCCESS: PYNQ-Z2 Block Design created and validated successfully!"
+set bd_file [get_files ${design_name}.bd]
+generate_target all $bd_file
+set wrapper [make_wrapper -files $bd_file -top]
+add_files -norecurse $wrapper
+set_property top ${design_name}_wrapper [current_fileset]
+update_compile_order -fileset sources_1
+puts "Block design generated. Legacy RR diagnostic ONLY; not trained SSAN."
+puts "Next: run synthesis and implementation, review timing and DRC, then generate bitstream."
+
